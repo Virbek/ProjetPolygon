@@ -1,15 +1,30 @@
-#include <GL/glut.h>
+#include <GL/freeglut.h>
 #include <iostream>
 #include <vector>
+#include <list>
 #include <stack>
 #include <cmath>
+#include <chrono>
+#include <string>
+
+
+
 
 
 enum BorderType { LEFT, RIGHT, BOTTOM, TOP };
+enum BezierMode { NONE, BERNSTEIN, DECASTELJAU };
+bool drawingBezier = false;
+
+
+struct Pixel{
+    int x, y;
+    float color[3];
+};
 
 struct Polygons {
     std::vector<std::pair<int, int>> points;
     float color[3];
+    std::vector<Pixel> pixelList;
 };
 
 struct SelectionBox {
@@ -17,7 +32,22 @@ struct SelectionBox {
     std::pair<int, int> end;    
     float color[3];
 };
+struct BezierCurve {
+    std::vector<Pixel> controlPoints;
+    std::vector<Pixel> curvePoints;
+    BezierMode mode;
+    int steps;
+    double computeTime;
+    float color[3];
+};
 
+std::list<BezierCurve> bezierCurves;
+std::vector<Pixel> currentControlPoints;
+BezierMode currentBezierMode = NONE;
+int currentBezierSteps = 1000;
+const int currentBezierStepsMin = 10;
+const int currentBezierStepsMax = 10000;
+float currentBezierColor[3] = {1.0f, 0.5f, 0.0f};
 float selectedColor[3] = {1.0f, 1.0f, 1.0f};
 int mouseX = 0, mouseY = 0;
 int windowWidth = 500, windowHeight = 500;
@@ -28,12 +58,17 @@ bool showLine = false;
 bool drawingPolygon = false;
 bool drawingSelectionBox = false;
 bool makeFill = false;
+bool recursif = false;
+bool pile = false;
+bool scanLine = false;
+bool LCA = false;
 std::vector<SelectionBox> selectionBoxList;
 std::pair<int, int> selectionBoxStart;
 std::pair<int, int> selectionBoxEnd;
 std::vector<std::pair<int, int>> trail;
 std::vector<std::pair<int, int>> LinePoints;
 std::vector<Polygons> polygonList;
+std::vector<Pixel> PixelList;
 Polygons currentPolygon;
 SelectionBox currentSelBox;
 
@@ -52,12 +87,11 @@ bool isSameColor(const float c1[3], const float c2[3], float tol = 0.01f) {
  */
 void getPixelColor(int x, int y, float outColor[3]) {
     GLubyte px[3];
-    // On lit 1 pixel en format RGB8
     glReadPixels(x, y, 1, 1, GL_RGB, GL_UNSIGNED_BYTE, px);
-    // Convertit [0..255] => [0..1]
     outColor[0] = px[0] / 255.0f;
     outColor[1] = px[1] / 255.0f;
     outColor[2] = px[2] / 255.0f;
+    PixelList.push_back({x, y, {outColor[0], outColor[1], outColor[2]}});
 }
 
 /**
@@ -69,11 +103,8 @@ void putPixel(int x, int y, const float color[3]) {
     glBegin(GL_POINTS);
         glVertex2i(x, y);
     glEnd();
-    // Pour éviter d'attendre la fin du dessin, on peut forcer le flush
-    // glFlush(); // si vous êtes en simple buffer
-    // ou glutSwapBuffers(); // si vous êtes en double buffer
-    // Selon votre code, vous pouvez laisser glutSwapBuffers()
-    // se faire dans displayCallBack().
+    glFlush(); 
+
 }
 
 
@@ -105,46 +136,179 @@ bool pointInPolygon(int x, int y, const std::vector<std::pair<int,int>>& polygon
 }
 
 
-void floodFillRecursive(const std::pair<int,int>& P,float boundaryColor[3] ,float newColor[3])
+void floodFillRecursive(const std::pair<int,int>& P,float boundaryColor[3])
 {
     int x = P.first;
     int y = P.second;
 
-    // 1. Vérification des coordonnées
-    if (x < 0 || x >= windowWidth || y < 0 || y >= windowHeight) {
-        return; 
-    }
-
-    // 2. Lire la couleur actuelle du pixel
     float currentColor[3];
     getPixelColor(x, y, currentColor);
 
-    // 3. Condition d'arrêt:
-    //    - si c'est la frontière
-    //    - ou si c'est déjà la couleur de remplissage
-    if (isSameColor(currentColor, boundaryColor) ||
-        isSameColor(currentColor, newColor)) {
+    if (isSameColor(currentColor, boundaryColor)) {
         return; 
     }
 
-    // 4. Colorier le pixel
-    putPixel(x, y, newColor);
+    putPixel(x, y, boundaryColor);
 
-    // 5. Appels récursifs dans les 4 directions
-    floodFillRecursive(std::make_pair(x+1, y), boundaryColor, newColor);
-    floodFillRecursive(std::make_pair(x-1, y), boundaryColor, newColor);
-    floodFillRecursive(std::make_pair(x, y+1), boundaryColor, newColor);
-    floodFillRecursive(std::make_pair(x, y-1), boundaryColor, newColor);
+    floodFillRecursive(std::make_pair(x+1, y), boundaryColor);
+    floodFillRecursive(std::make_pair(x-1, y), boundaryColor);
+    floodFillRecursive(std::make_pair(x, y+1), boundaryColor);
+    floodFillRecursive(std::make_pair(x, y-1), boundaryColor);
 
-    // Si vous désirez un 8-voisinage:
-    // floodFillRecursive(std::make_pair(x+1, y+1), newColor);
-    // floodFillRecursive(std::make_pair(x-1, y-1), newColor);
-    // floodFillRecursive(std::make_pair(x+1, y-1), newColor);
-    // floodFillRecursive(std::make_pair(x-1, y+1), newColor);
+    glutSwapBuffers();
+}
+
+void floodFillStack(std::pair<int,int>& P, float boundaryColor[3]){
+    std::stack<std::pair<int, int>> pile;
+    pile.push({P.first, P.second});
+
+    while(!pile.empty()){
+        auto[x,y] = pile.top();
+        pile.pop();
+
+        float currentColor[3];
+        getPixelColor(x, y, currentColor);
+
+        if (isSameColor(currentColor, boundaryColor)) {
+            continue; 
+        }
+
+        putPixel(x, y, boundaryColor);
+
+        pile.push(std::make_pair(x+1, y));
+        pile.push(std::make_pair(x-1, y));
+        pile.push(std::make_pair(x, y+1));
+        pile.push(std::make_pair(x, y-1));
+    }
+
+}
+
+void scanlineFloodFill(int startX, int startY, float boundaryColor[3]) {
+    std::stack<std::pair<int,int>> pile;
+    pile.push({startX, startY});
+
+    while (!pile.empty()) {
+        auto top = pile.top();
+        int x = top.first;
+        int y = top.second;
+        pile.pop();
+
+        int xLeft = x;
+        float currentColor[3];
+        while (xLeft >= 0) {
+            getPixelColor(xLeft, y, currentColor);
+            if (isSameColor(currentColor, boundaryColor))
+                break;
+            xLeft--;
+        }
+        xLeft++; 
+
+        bool spanUp = false;
+        bool spanDown = false;
+
+        while (xLeft < windowWidth) {
+            getPixelColor(xLeft, y, currentColor);
+            if (isSameColor(currentColor, boundaryColor))
+                break;
+
+            putPixel(xLeft, y, boundaryColor);
+
+            if (y > 0) {
+                float aboveColor[3];
+                getPixelColor(xLeft, y - 1, aboveColor);
+                if (!(isSameColor(aboveColor, boundaryColor))) {
+                    if (!spanUp) {
+                        pile.push({xLeft, y - 1});
+                        spanUp = true;
+                    }
+                } else {
+                    spanUp = false;
+                }
+            }
+
+            if (y < windowHeight - 1) {
+                float belowColor[3];
+                getPixelColor(xLeft, y + 1, belowColor);
+                if (!(isSameColor(belowColor, boundaryColor))) {
+                    if (!spanDown) {
+                        pile.push({xLeft, y + 1});
+                        spanDown = true;
+                    }
+                } else {
+                    spanDown = false;
+                }
+            }
+            xLeft++;
+        }
+    }
+}
+
+std::vector<int> pascalLine(int n) {
+    std::vector<int> line(n + 1, 1);
+    for (int i = 1; i < n; ++i) {
+        line[i] = line[i - 1] * (n - i + 1) / i;
+    }
+    return line;
+}
+
+// Fonction pour calculer un point de la courbe de Bézier pour un t donné
+Pixel bezierPoint(const std::vector<Pixel>& controlPoints, double t) {
+    int n = controlPoints.size() - 1;
+    std::vector<int> C = pascalLine(n);
+    Pixel result = {0, 0};
+
+    for (int i = 0; i <= n; ++i) {
+        double coeff = C[i] * pow(1 - t, n - i) * pow(t, i);
+        result.x += coeff * controlPoints[i].x;
+        result.y += coeff * controlPoints[i].y;
+    }
+
+    return result;
+}
+
+// Fonction pour générer la courbe de Bézier en utilisant des pas de t
+std::vector<Pixel> bezierCurve(const std::vector<Pixel>& controlPoints, int steps = 100) {
+    std::vector<Pixel> curvePoints;
+    for (int i = 0; i <= steps; ++i) {
+        double t = static_cast<double>(i) / steps;
+        curvePoints.push_back(bezierPoint(controlPoints, t));
+    }
+    return curvePoints;
+}
+
+Pixel deCasteljauIterative(const std::vector<Pixel>& controlPoints, double t) {
+    std::vector<double> px, py;
+    for (const Pixel& p : controlPoints) {
+        px.push_back(p.x);
+        py.push_back(p.y);
+    }
+    int n = controlPoints.size();
+    for (int k = 1; k < n; ++k) {
+        for (int i = 0; i < n - k; ++i) {
+            px[i] = (1 - t) * px[i] + t * px[i + 1];
+            py[i] = (1 - t) * py[i] + t * py[i + 1];
+        }
+    }
+    Pixel result;
+    result.x = static_cast<int>(px[0]);
+    result.y = static_cast<int>(py[0]);
+    result.color[0] = controlPoints[0].color[0];
+    result.color[1] = controlPoints[0].color[1];
+    result.color[2] = controlPoints[0].color[2];
+    return result;
+}
+
+std::vector<Pixel> bezierCurveDeCasteljau(const std::vector<Pixel>& controlPoints, int steps = 100) {
+    std::vector<Pixel> curvePoints;
+    for (int i = 0; i <= steps; ++i) {
+        double t = static_cast<double>(i) / steps;
+        curvePoints.push_back(deCasteljauIterative(controlPoints, t));
+    }
+    return curvePoints;
 }
 
 
-std::pair<int,int> computeIntersection(
+std::pair<int,int> computeIntersectionSutherland(
     const std::pair<int,int>& S1, 
     const std::pair<int,int>& S2, 
     float boundaryValue, 
@@ -155,10 +319,7 @@ std::pair<int,int> computeIntersection(
     float x, y;
     
     if (border == LEFT || border == RIGHT) {
-        // Eviter la division par zéro
         if (std::abs(x2 - x1) < 1e-5f) {
-            // Segment quasi vertical -> On peut retourner S1 (ou S2) 
-            // ou gérer autrement
             return S1; 
         }
         float t = (boundaryValue - x1) / (x2 - x1);
@@ -166,7 +327,6 @@ std::pair<int,int> computeIntersection(
         y = y1 + t * (y2 - y1);
     } 
     else {
-        // border == TOP ou BOTTOM (clip horizontal)
         if (std::abs(y2 - y1) < 1e-5f) {
             return S1;
         }
@@ -178,13 +338,12 @@ std::pair<int,int> computeIntersection(
     return std::make_pair((int)x, (int)y);
 }
 
-std::vector<std::pair<int,int>> clipWithBorder(
+std::vector<std::pair<int,int>> clipWithBorderSutherland(
     const std::vector<std::pair<int,int>>& inPolygon,
     float boundaryValue,
     BorderType border
 ) {
     std::vector<std::pair<int,int>> outPolygon;
-    // On "ferme" le polygone : dernier -> premier
     for (size_t i = 0; i < inPolygon.size(); i++) {
         std::pair<int,int> current = inPolygon[i];
         std::pair<int,int> next = inPolygon[(i + 1) % inPolygon.size()];
@@ -193,52 +352,145 @@ std::vector<std::pair<int,int>> clipWithBorder(
         bool nextInside = isInside(next, boundaryValue, border);
 
         if (currInside && nextInside) {
-            // Garder le next
             outPolygon.push_back(next);
         } 
         else if (currInside && !nextInside) {
-            // De dedans à dehors => intersection
-            outPolygon.push_back(computeIntersection(current, next, boundaryValue, border));
+            outPolygon.push_back(computeIntersectionSutherland(current, next, boundaryValue, border));
         }
         else if (!currInside && nextInside) {
-            // De dehors à dedans => intersection + next
-            outPolygon.push_back(computeIntersection(current, next, boundaryValue, border));
+            outPolygon.push_back(computeIntersectionSutherland(current, next, boundaryValue, border));
             outPolygon.push_back(next);
         }
-        // Sinon dehors->dehors => rien
     }
     return outPolygon;
 }
 
-Polygons clipPolygon(const Polygons& inputPoly, const SelectionBox& box) {
+Polygons clipPolygonSutherland(const Polygons& inputPoly, const SelectionBox& box) {
     Polygons output;
 
-    // Déterminer xmin, xmax, ymin, ymax
     float xmin = std::min(box.start.first, box.end.first);
     float xmax = std::max(box.start.first, box.end.first);
     float ymin = std::min(box.start.second, box.end.second);
     float ymax = std::max(box.start.second, box.end.second);
 
-    // On récupère les points d'entrée
     std::vector<std::pair<int,int>> clippedPoints = inputPoly.points;
 
-    // 1) Clip bord gauche : x >= xmin
-    clippedPoints = clipWithBorder(clippedPoints, xmin, LEFT);
+    clippedPoints = clipWithBorderSutherland(clippedPoints, xmin, LEFT);
 
-    // 2) Clip bord droit : x <= xmax
-    clippedPoints = clipWithBorder(clippedPoints, xmax, RIGHT);
+    clippedPoints = clipWithBorderSutherland(clippedPoints, xmax, RIGHT);
 
-    // 3) Clip bord bas : y >= ymin
-    clippedPoints = clipWithBorder(clippedPoints, ymin, BOTTOM);
+    clippedPoints = clipWithBorderSutherland(clippedPoints, ymin, BOTTOM);
 
-    // 4) Clip bord haut : y <= ymax
-    clippedPoints = clipWithBorder(clippedPoints, ymax, TOP);
+    clippedPoints = clipWithBorderSutherland(clippedPoints, ymax, TOP);
 
-    // Assigner le nouveau polygone
     output.points = clippedPoints;
+
+    output.color[0] = 1.0f;
+    output.color[1] = 0.0f;
+    output.color[2] = 1.0f;
+
+    return output;
+}
+
+std::pair<int,int> computeIntersectionCyrusBeck(
+    const std::pair<int,int>& S1, 
+    const std::pair<int,int>& S2, 
+    float boundaryValue, 
+    BorderType border
+) {
+    float x1 = static_cast<float>(S1.first), y1 = static_cast<float>(S1.second);
+    float x2 = static_cast<float>(S2.first), y2 = static_cast<float>(S2.second);
+    float dx = x2 - x1, dy = y2 - y1;
     
-    // Vous pouvez choisir une couleur différente
-    output.color[0] = 1.0f; // Magenta, par ex.
+    // Définir la normale N et un point F sur le bord en fonction du type
+    float Nx = 0.0f, Ny = 0.0f, Fx = 0.0f, Fy = 0.0f;
+    switch(border) {
+        case LEFT:
+            // Pour x >= boundaryValue, la normale extérieure est (-1, 0)
+            Nx = -1.0f; Ny = 0.0f;
+            Fx = boundaryValue; Fy = 0.0f; // F peut être (xmin, 0)
+            break;
+        case RIGHT:
+            // Pour x <= boundaryValue, la normale extérieure est (1, 0)
+            Nx = 1.0f; Ny = 0.0f;
+            Fx = boundaryValue; Fy = 0.0f;
+            break;
+        case BOTTOM:
+            // Pour y >= boundaryValue, la normale extérieure est (0, -1)
+            Nx = 0.0f; Ny = -1.0f;
+            Fx = 0.0f; Fy = boundaryValue;
+            break;
+        case TOP:
+            // Pour y <= boundaryValue, la normale extérieure est (0, 1)
+            Nx = 0.0f; Ny = 1.0f;
+            Fx = 0.0f; Fy = boundaryValue;
+            break;
+    }
+    
+    // Calcul du produit scalaire D · N
+    float DdotN = dx * Nx + dy * Ny;
+    if (std::abs(DdotN) < 1e-5f) {
+        // Le segment est pratiquement parallèle au bord : on retourne S1 par défaut
+        return S1;
+    }
+    // Calcul de t avec t = (N · (F - S1)) / (N · D)
+    float numerator = (Fx - x1) * Nx + (Fy - y1) * Ny;
+    float t = numerator / DdotN;
+    
+    float xi = x1 + t * dx;
+    float yi = y1 + t * dy;
+    return std::make_pair(static_cast<int>(xi), static_cast<int>(yi));
+}
+
+// Fonction de clipping par un bord avec Cyrus-Beck
+std::vector<std::pair<int,int>> clipWithBorderCyrusBeck(
+    const std::vector<std::pair<int,int>>& inPolygon,
+    float boundaryValue,
+    BorderType border
+) {
+    std::vector<std::pair<int,int>> outPolygon;
+    for (size_t i = 0; i < inPolygon.size(); i++) {
+        std::pair<int,int> current = inPolygon[i];
+        std::pair<int,int> next = inPolygon[(i + 1) % inPolygon.size()];
+
+        bool currInside = isInside(current, boundaryValue, border);
+        bool nextInside = isInside(next, boundaryValue, border);
+
+        if (currInside && nextInside) {
+            outPolygon.push_back(next);
+        } 
+        else if (currInside && !nextInside) {
+            outPolygon.push_back(computeIntersectionCyrusBeck(current, next, boundaryValue, border));
+        }
+        else if (!currInside && nextInside) {
+            outPolygon.push_back(computeIntersectionCyrusBeck(current, next, boundaryValue, border));
+            outPolygon.push_back(next);
+        }
+        // Si les deux points sont à l'extérieur, aucun point n'est ajouté
+    }
+    return outPolygon;
+}
+
+// Fonction principale de clipping du polygone
+Polygons clipPolygonCyrusBeck(const Polygons& inputPoly, const SelectionBox& box) {
+    Polygons output;
+
+    float xmin = std::min(box.start.first, box.end.first);
+    float xmax = std::max(box.start.first, box.end.first);
+    float ymin = std::min(box.start.second, box.end.second);
+    float ymax = std::max(box.start.second, box.end.second);
+
+    std::vector<std::pair<int,int>> clippedPoints = inputPoly.points;
+
+    clippedPoints = clipWithBorderCyrusBeck(clippedPoints, xmin, LEFT);
+    clippedPoints = clipWithBorderCyrusBeck(clippedPoints, xmax, RIGHT);
+    clippedPoints = clipWithBorderCyrusBeck(clippedPoints, ymin, BOTTOM);
+    clippedPoints = clipWithBorderCyrusBeck(clippedPoints, ymax, TOP);
+
+    output.points = clippedPoints;
+
+    // Couleur d'exemple
+    output.color[0] = 1.0f;
     output.color[1] = 0.0f;
     output.color[2] = 1.0f;
 
@@ -264,30 +516,33 @@ void colorMenuCallBack(int value){
     }
 }
 
-
-void menuCallBack(int value){
-    std::vector<Polygons> newPolygon;
-    bool clippedFlag = false;
-    switch (value) {
+void FillMenuCallBack(int value){
+    switch(value){
         case 1:
+            makeFill = true;
+            recursif = true;
             break;
         case 2:
-            std::cout << "Option 2 selectionnee" << std::endl;
-            showPixel = true;
-            showLine = true;
+            makeFill= true;
+            pile = true;
             break;
         case 3:
-            std::cout << "Option 3 selectionnee" << std::endl;
-            drawingSelectionBox = true;
+            makeFill = true;
+            scanLine = true;
             break;
-        case 4:
-            std::cout << "Option 4 selectionnee" << std::endl;
+    }
+}
+
+void FenMenuCallBack(int value){
+    std::vector<Polygons> newPolygon;
+    bool clippedFlag = false;
+    switch(value){
+        case 1:
             if (!polygonList.empty() && !selectionBoxList.empty()) {
                 for(Polygons p : polygonList){
                     for(SelectionBox sb : selectionBoxList){
 
-                        Polygons clipped = clipPolygon(p, sb);
-                        // On l'ajoute à la liste
+                        Polygons clipped = clipPolygonSutherland(p, sb);
                         if (!clipped.points.empty()) {
                             newPolygon.push_back(clipped);
                             clippedFlag = true;
@@ -306,9 +561,54 @@ void menuCallBack(int value){
             selectionBoxList.clear();
             polygonList = newPolygon;
             break;
-        case 5:
-            std::cout << "Option 5 selectionnee" << std::endl;
-            makeFill = true;
+        case 2:
+            if (!polygonList.empty() && !selectionBoxList.empty()) {
+                for(Polygons p : polygonList){
+                    for(SelectionBox sb : selectionBoxList){
+
+                        Polygons clipped = clipPolygonCyrusBeck(p, sb);
+                        if (!clipped.points.empty()) {
+                            newPolygon.push_back(clipped);
+                            clippedFlag = true;
+                        }
+                    }
+                    if (!clippedFlag)
+                    {
+                        newPolygon.push_back(p);
+                    }else{
+                        clippedFlag = false;
+                    }
+                    
+                }
+            }
+            polygonList.clear();
+            selectionBoxList.clear();
+            polygonList = newPolygon;
+            break;
+        case 3:
+            selectedColor[0] = 0.0f; selectedColor[1] = 0.0f; selectedColor[2] = 1.0f; // Bleu
+            std::cout << "Couleur bleue selectionnee" << std::endl;
+            break;
+    }
+}
+
+
+
+void menuCallBack(int value){
+    switch (value) {
+        case 1:
+            break;
+        case 2:
+            showPixel = true;
+            showLine = true;
+            break;
+        case 3:
+            drawingSelectionBox = true;
+            break;
+        case 4:
+            drawingBezier = true;
+            currentControlPoints.clear();
+            std::cout << "Mode courbe de Bézier activé. Cliquez pour placer les points de contrôle." << std::endl;
             break;
     }
 }
@@ -366,6 +666,12 @@ void polygonStay(Polygons p){
     for (const auto& point : p.points) {
         glVertex2i(point.first, point.second);
     }
+    if(!p.pixelList.empty()){
+        for(Pixel p : p.pixelList){
+            glColor3fv(p.color);
+            glVertex2i(p.x, p.y);
+        }
+    }
     glEnd();
 }
 
@@ -378,6 +684,54 @@ void SelBoxStay(SelectionBox sb){
     glVertex2i(sb.start.first, sb.end.second);
     glEnd();
 }
+
+void drawBezierCurve() {
+    if (currentBezierMode != NONE && currentControlPoints.size() >= 2) {
+        std::vector<Pixel> curvePoints;
+        if (currentBezierMode == BERNSTEIN)
+            curvePoints = bezierCurve(currentControlPoints);
+        else if (currentBezierMode == DECASTELJAU)
+            curvePoints = bezierCurveDeCasteljau(currentControlPoints);
+
+        glBegin(GL_LINE_STRIP);
+        for (const Pixel& pt : curvePoints) {
+            glVertex2i(pt.x, pt.y);
+        }
+        glEnd();
+    }
+}
+
+void drawBezierCurveWithTiming() {
+    if (currentControlPoints.size() >= 2 && currentBezierMode != NONE) {
+        std::vector<Pixel> curvePoints;
+        int steps = 1000; // Par exemple, pour avoir une courbe bien lisse
+
+        auto start = std::chrono::high_resolution_clock::now();
+
+        if (currentBezierMode == BERNSTEIN)
+            curvePoints = bezierCurve(currentControlPoints, steps);
+        else if (currentBezierMode == DECASTELJAU)
+            curvePoints = bezierCurveDeCasteljau(currentControlPoints, steps);
+
+        auto end = std::chrono::high_resolution_clock::now();
+        double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
+
+        // Affiche le temps en ms dans la console
+        if (currentBezierMode == BERNSTEIN)
+            std::cout << "[Bernstein] Temps de calcul : " << elapsed << " ms pour " << currentControlPoints.size() << " points de contrôle, " << steps << " segments." << std::endl;
+        else
+            std::cout << "[De Casteljau] Temps de calcul : " << elapsed << " ms pour " << currentControlPoints.size() << " points de contrôle, " << steps << " segments." << std::endl;
+
+        // Tracé de la courbe (chaînage des points)
+        glColor3f(0.2, 0.2, 1.0); // Bleu par exemple
+        glBegin(GL_LINE_STRIP);
+        for (const Pixel& pt : curvePoints) {
+            glVertex2i(pt.x, pt.y);
+        }
+        glEnd();
+    }
+}
+
 
 void displayCallBack(){
     glClear(GL_COLOR_BUFFER_BIT);
@@ -405,6 +759,44 @@ void displayCallBack(){
         drawPolygon();
     }
 
+    if (!currentControlPoints.empty()) {
+        glColor3f(1.0, 0.5, 0.0); // Par exemple orange
+        glPointSize(7);
+        glBegin(GL_POINTS);
+        for (const Pixel& pt : currentControlPoints) {
+            glVertex2i(pt.x, pt.y);
+        }
+        glEnd();
+        glPointSize(1);
+    }
+
+    if (currentControlPoints.size() >= 2) {
+        glColor3fv(selectedColor); // ou une couleur différente
+        glBegin(GL_LINE_STRIP);
+        for (const Pixel& pt : currentControlPoints) {
+            glVertex2i(pt.x, pt.y);
+        }
+        glEnd();
+    }
+
+
+    for (const auto& curve : bezierCurves) {
+        glColor3fv(curve.color);
+        glBegin(GL_LINE_STRIP);
+        for (const Pixel& pt : curve.curvePoints)
+            glVertex2i(pt.x, pt.y);
+        glEnd();
+    
+        // Affiche aussi les points de contrôle (optionnel)
+        glColor3fv(curve.color);
+        glPointSize(7);
+        glBegin(GL_POINTS);
+        for (const Pixel& p : curve.controlPoints)
+            glVertex2i(p.x, p.y);
+        glEnd();
+        glPointSize(1);
+    }
+
     if(!polygonList.empty()){
         for(Polygons p : polygonList){
             polygonStay(p);
@@ -420,6 +812,11 @@ void displayCallBack(){
             SelBoxStay(sb);
         }
     }
+
+    glColor3f(0.0, 0.0, 0.0);
+    glRasterPos2i(10, windowHeight - 40);
+    std::string stepText = "Pas (steps): " + std::to_string(currentBezierSteps);
+    for (char c : stepText) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, c);
 
     glutSwapBuffers();
 }
@@ -450,11 +847,15 @@ void motionCallBack(int x, int y){
 
 void mouseCallBack(int input, int state, int x, int y){
     if (input == GLUT_LEFT_BUTTON && state == GLUT_DOWN) {
-         // Ajouter la position actuelle à la traînée
+         if (drawingBezier) {
+            Pixel clickedPixel = {x, windowHeight - y, {currentBezierColor[0], currentBezierColor[1], currentBezierColor[2]}};
+            currentControlPoints.push_back(clickedPixel);
+            glutPostRedisplay();
+        }
         if (showLine && showPixel) {
                 drawTrail = true;
                 trail.emplace_back(x, windowHeight - y);
-                LinePoints.emplace_back(x, windowHeight - y); // Ajouter un point au polygone
+                LinePoints.emplace_back(x, windowHeight - y); 
                 currentPolygon.points.emplace_back(x, windowHeight - y);
             }
         if (drawingSelectionBox) {
@@ -475,19 +876,48 @@ void mouseCallBack(int input, int state, int x, int y){
             }
         }
         if (makeFill && !drawingPolygon) {
-        int adjustedY = windowHeight - y; // pour ajuster la coordonnée y
-            // Parcourir les polygones terminés
-            for (auto& poly : polygonList) {
-                if (pointInPolygon(x, adjustedY, poly.points)) {
-                    std::cout << "Remplissage du polygone à partir du point (" 
-                            << x << ", " << adjustedY << ")" << std::endl;
-                    // On peut utiliser ici la version récursive ou itérative
-                    floodFillRecursive(std::make_pair(x, adjustedY), poly.color, selectedColor);
-                    // Une fois le remplissage effectué, on réinitialise le flag
-                    makeFill = false;
-                    break;
+        int adjustedY = windowHeight - y; 
+            if(recursif){
+                for (auto& poly : polygonList) {
+                    if (pointInPolygon(x, adjustedY, poly.points)) {
+                        std::cout << "Remplissage du polygone à partir du point (" 
+                                << x << ", " << adjustedY << ")" << std::endl;
+                        floodFillRecursive(std::make_pair(x, adjustedY), poly.color);
+                        poly.pixelList = PixelList;
+                        PixelList.clear();
+                        makeFill = false;
+                        recursif = false;
+                        break;
+                    }
                 }
-            }
+            }else if(pile){
+                for (auto& poly : polygonList) {
+                    if (pointInPolygon(x, adjustedY, poly.points)) {
+                        std::cout << "Remplissage du polygone à partir du point (" 
+                                << x << ", " << adjustedY << ")" << std::endl;
+                        std::pair<int, int> fillPoint = std::make_pair(x, adjustedY);
+                        floodFillStack(fillPoint, poly.color);
+                        poly.pixelList = PixelList;
+                        PixelList.clear();
+                        makeFill = false;
+                        pile = false;
+                        break;
+                    }
+                }  
+            }else if(scanLine){
+                for (auto& poly : polygonList) {
+                    if (pointInPolygon(x, adjustedY, poly.points)) {
+                        std::cout << "Remplissage du polygone à partir du point (" 
+                                << x << ", " << adjustedY << ")" << std::endl;
+                       scanlineFloodFill(x, adjustedY, poly.color);
+                        poly.pixelList = PixelList;
+                        PixelList.clear();
+                        makeFill = false;
+                        scanLine = false;
+                        break;
+                    }
+                }  
+            } 
         }
     } else if (input == GLUT_LEFT_BUTTON && state == GLUT_UP) {
         drawTrail = false;
@@ -513,25 +943,44 @@ void keyboard(unsigned char key, int x, int y){
             currentPolygon.color[0] = selectedColor[0];
             currentPolygon.color[1] = selectedColor[1];
             currentPolygon.color[2] = selectedColor[2];
-            polygonList.push_back(currentPolygon); // Ajouter le polygone actuel à la liste
+            polygonList.push_back(currentPolygon);
             showPixel = false;
             drawingPolygon = false;
             showLine = false;
             currentPolygon.points.clear();
             LinePoints.clear();
             trail.clear();
+
             break;
         case 27:
             polygonList.clear();
             selectionBoxList.clear();
+            currentControlPoints.clear();
+            currentBezierMode = NONE;
+            drawingBezier = false;
+            break;
+        case '+':
+        case '=': // Pour le + du clavier principal
+            if (currentBezierSteps < currentBezierStepsMax)
+                currentBezierSteps += 10;
+            // Recalcule la courbe si déjà affichée
+            std::cout << "Pas augmenté: " << currentBezierSteps << std::endl;
+            glutPostRedisplay();
+            break;
+        case '-':
+        case '_': // Pour le - du clavier principal
+            if (currentBezierSteps > currentBezierStepsMin)
+                currentBezierSteps -= 10;
+            std::cout << "Pas diminué: " << currentBezierSteps << std::endl;
+            glutPostRedisplay();
             break;
     }
     glutPostRedisplay();
 }
 
 void timerCallback(int value) {
-    glutPostRedisplay(); // Forcer un redessin
-    glutTimerFunc(16, timerCallback, 0); // Réenregistrer le timer pour 16 ms (environ 60 FPS)
+    glutPostRedisplay(); 
+    glutTimerFunc(16, timerCallback, 0);
 }
 
 int main(int argc, char **argv){
@@ -547,13 +996,86 @@ int main(int argc, char **argv){
     glutAddMenuEntry("Rouge", 2);
     glutAddMenuEntry("Bleu", 3);
 
+    int FillMenu = glutCreateMenu(FillMenuCallBack);
+
+    glutAddMenuEntry("Recursif", 1);
+    glutAddMenuEntry("Pile", 2);
+    glutAddMenuEntry("ScanLine", 3);
+    glutAddMenuEntry("LCA", 4);
+
+    int FenMenu = glutCreateMenu(FenMenuCallBack);
+    glutAddMenuEntry("Sutherland - Hodgman", 1);
+    glutAddMenuEntry("CyrusBeck", 2);
+
+    int PosePointsMenu = glutCreateMenu([](int value){
+        if (value == 1) {
+            currentBezierMode = NONE;
+            drawingBezier = true;
+            currentControlPoints.clear();
+            std::cout << "Mode : Pose des points de contrôle activé." << std::endl;
+        }
+    });
+    glutAddMenuEntry("Poser points de Bézier", 1);
+
+    // Menu pour sélectionner l'algorithme de tracé
+    int TraceBezierMenu = glutCreateMenu([](int value){
+        if (currentControlPoints.size() < 2) return;
+
+        BezierCurve newCurve;
+        newCurve.controlPoints = currentControlPoints;
+        newCurve.mode = (value == 1 ? BERNSTEIN : DECASTELJAU);
+        newCurve.steps = currentBezierSteps;
+        newCurve.color[0] = currentBezierColor[0];
+        newCurve.color[1] = currentBezierColor[1];
+        newCurve.color[2] = currentBezierColor[2];
+    
+        auto start = std::chrono::high_resolution_clock::now();
+        if (newCurve.mode == BERNSTEIN)
+            newCurve.curvePoints = bezierCurve(newCurve.controlPoints, newCurve.steps);
+        else
+            newCurve.curvePoints = bezierCurveDeCasteljau(newCurve.controlPoints, newCurve.steps);
+        auto end = std::chrono::high_resolution_clock::now();
+        newCurve.computeTime = std::chrono::duration<double, std::milli>(end - start).count();
+    
+        bezierCurves.push_back(newCurve);
+    
+        // Reset pour une nouvelle courbe
+        currentControlPoints.clear();
+        currentBezierMode = NONE;
+    
+        glutPostRedisplay();
+    });
+    glutAddMenuEntry("Tracer par Bernstein", 1);
+    glutAddMenuEntry("Tracer par De Casteljau", 2);
+
+    int BezierTestMenu = glutCreateMenu([](int value){
+        if (value == 1) {
+            currentControlPoints.clear();
+            int N = 60; // par exemple 60 points de contrôle
+            for (int i = 0; i < N; ++i) {
+                Pixel p;
+                p.x = 20 + (i * (windowWidth - 40)) / (N-1);
+                p.y = 50 + (std::rand() % (windowHeight - 100)); // hauteur aléatoire
+                p.color[0] = 1.0f; p.color[1] = 0.5f; p.color[2] = 0.0f;
+                currentControlPoints.push_back(p);
+            }
+            drawingBezier = false;
+            glutPostRedisplay();
+            std::cout << "Test : " << N << " points de contrôle créés." << std::endl;
+        }
+    });
+    glutAddMenuEntry("Générer 60 points Bézier (test perf)", 1);
+
     int menu = glutCreateMenu(menuCallBack);
 
     glutAddSubMenu("Couleurs", colorMenu);
     glutAddMenuEntry("polygone a decouper", 2);
     glutAddMenuEntry("trace fenetre", 3);
-    glutAddMenuEntry("fenetrage", 4);
-    glutAddMenuEntry("remplissage", 5);
+    glutAddSubMenu("fenetrage", FenMenu);
+    glutAddSubMenu("remplissage", FillMenu);
+    glutAddSubMenu("Poser points Bézier", PosePointsMenu);
+    glutAddSubMenu("Tracer courbe Bézier", TraceBezierMenu);
+    glutAddSubMenu("Test+50 point", BezierTestMenu);
 
 
     glutAttachMenu(GLUT_RIGHT_BUTTON);
