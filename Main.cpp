@@ -7,6 +7,9 @@
 #include <chrono>
 #include <string>
 #include <algorithm>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 
 
@@ -16,6 +19,9 @@ enum BorderType { LEFT, RIGHT, BOTTOM, TOP };
 enum BezierMode { NONE, BERNSTEIN, DECASTELJAU };
 bool drawingBezier = false;
 
+struct Mat3{
+    float m[3][3];
+};
 
 struct Pixel{
     int x, y;
@@ -101,6 +107,7 @@ bool showLine = false;
 bool drawingPolygon = false;
 bool drawingSelectionBox = false;
 bool deleteCurve = false;
+bool selectCurve = false;
 bool makeFill = false;
 bool recursif = false;
 bool pile = false;
@@ -117,9 +124,55 @@ std::vector<Polygons> polygonList;
 std::vector<Pixel> PixelList;
 Polygons currentPolygon;
 SelectionBox currentSelBox;
+BezierCurve* selectedCurvePtr = nullptr;
+
+
+//Matrice Identité
+Mat3 matIdentity(){
+    Mat3 mat = { { {1,0,0}, {0,1,0}, {0,0,1} } };
+    return mat;
+}
+
+Mat3 matTranslate(float tx, float ty){
+    Mat3 mat = { { {1,0,tx}, {0,1,ty}, {0,0,1} } };
+    return mat;
+}
+
+Mat3 matScale(float sx, float sy){
+    Mat3 mat = { { {sx,0,0}, {0,sy,0}, {0,0,1} } };
+    return mat;
+}
+
+Mat3 matRotate(float angle){
+    Mat3 mat = { { {cos(angle),-sin(angle),0}, {sin(angle),cos(angle),0}, {0,0,1} } };
+    return mat;
+}
+
+Mat3 matShear(float shx, float shy){
+    Mat3 mat = { { {1,shx,0}, {shy,1,0}, {0,0,1} } };
+    return mat;
+}
+
+Mat3 matMult(const Mat3& a, const Mat3& b){
+    Mat3 result = { { {0,0,0}, {0,0,0}, {0,0,0} } };
+    for(int i=0; i<3; i++){
+        for(int j=0; j<3; j++){
+            for(int k=0; k<3; k++){
+                result.m[i][j] += a.m[i][k] * b.m[k][j];
+            }
+        }
+    }
+    return result;
+}
 
 
 
+void applyMatToPoint(float &x , float &y, const Mat3& mat){
+    float newX = mat.m[0][0] * x + mat.m[0][1] * y + mat.m[0][2];
+    float newY = mat.m[1][0] * x + mat.m[1][1] * y + mat.m[1][2];
+    x = newX;
+    y = newY;
+}
 
 bool isSameColor(const float c1[3], const float c2[3], float tol = 0.01f) {
     return (std::fabs(c1[0] - c2[0]) < tol &&
@@ -351,8 +404,14 @@ Pixel deCasteljauIterative(const std::vector<Pixel>& controlPoints, double t) {
     return result;
 }
 
-std::vector<Pixel> bezierCurveDeCasteljau(const std::vector<Pixel>& controlPoints, int steps = 100) {
+std::vector<Pixel> bezierCurveDeCasteljau(const LinkedPoint* head, int steps = 100) {
     std::vector<Pixel> curvePoints;
+    const LinkedPoint* current = head;
+    std::vector<Pixel> controlPoints;
+    while (current != nullptr) {
+        controlPoints.push_back(current->pixel);
+        current = current->next;
+    }
     for (int i = 0; i <= steps; ++i) {
         double t = static_cast<double>(i) / steps;
         curvePoints.push_back(deCasteljauIterative(controlPoints, t));
@@ -667,6 +726,11 @@ void menuCallBack(int value){
             drawingBezier = false;
             deleteCurve = true;
             break;
+        case 6:
+            movingPoints = false;
+            drawingBezier = false;
+            selectCurve = true;
+            break;
 
     }
 }
@@ -934,6 +998,27 @@ void mouseCallBack(int input, int state, int x, int y){
                 currentCurve = currentCurve->next;
             }
         }
+        if (selectCurve) {
+            std::cout << "Suppression de la courbe" << std::endl;
+            if(selectedCurvePtr != nullptr){
+                selectedCurvePtr->color[0] = 1.0f;
+                selectedCurvePtr->color[1] = 0.5f;
+                selectedCurvePtr->color[2] = 0.0f;
+            }
+            ListChaineCourbes* currentCurve = bezierHead;
+            while (currentCurve != nullptr) {
+                if (std::any_of(currentCurve->list.curvePoints.begin(), currentCurve->list.curvePoints.end(), 
+                    [x, y](const Pixel& p) { return std::abs(p.x - x) < 5 && std::abs(p.y - (windowHeight - y)) < 5; })) {
+                        currentCurve->list.color[0] = 0.0f;
+                        currentCurve->list.color[1] = 1.0f;
+                        currentCurve->list.color[2] = 0.0f;
+                        selectedCurvePtr = &currentCurve->list;
+                        break;
+                }
+                currentCurve = currentCurve->next;
+            }
+            selectCurve = false;
+        }
          // Déplacement des points de contrôle
          // std::cout << "x: " << x << " y: " << y << std::endl;
          // std::cout << "mouseX: " << mouseX << " mouseY: " << mouseY << std::endl;
@@ -951,9 +1036,9 @@ void mouseCallBack(int input, int state, int x, int y){
                         movingSoloPoint = false;
                         auto start = std::chrono::high_resolution_clock::now();
                         if (currentCurve->list.mode == BERNSTEIN)
-                        currentCurve->list.curvePoints = bezierCurve(currentCurve->list.head, currentCurve->list.steps);
+                            currentCurve->list.curvePoints = bezierCurve(currentCurve->list.head, currentCurve->list.steps);
                         else
-                        currentCurve->list.curvePoints = bezierCurveDeCasteljau(currentCurve->list.controlPoints, currentCurve->list.steps);
+                            currentCurve->list.curvePoints = bezierCurveDeCasteljau(currentCurve->list.head, currentCurve->list.steps);
                         auto end = std::chrono::high_resolution_clock::now();
                         currentCurve->list.computeTime = std::chrono::duration<double, std::milli>(end - start).count();
                         glutPostRedisplay();
@@ -1049,6 +1134,22 @@ void reshapeCallback(int width, int height) {
     glLoadIdentity();
 }
 
+void transformCurve(BezierCurve& curve, const Mat3& mat) {
+    // Applique la matrice sur tous les points de contrôle de la courbe (dans la liste chaînée)
+    LinkedPoint* pt = curve.head;
+    while (pt) {
+        float x = pt->pixel.x, y = pt->pixel.y;
+        applyMatToPoint(x, y, mat);
+        pt->pixel.x = x;
+        pt->pixel.y = y;
+        pt = pt->next;
+    }
+    // Mets à jour les points de la courbe affichée
+    if (curve.mode == BERNSTEIN)
+        curve.curvePoints = bezierCurve(curve.head, curve.steps);
+    else
+        curve.curvePoints = bezierCurveDeCasteljau(curve.head, curve.steps);
+}
 
 void keyboard(unsigned char key, int x, int y){
     switch (key) {
@@ -1071,6 +1172,11 @@ void keyboard(unsigned char key, int x, int y){
             currentControlPoints.clear();
             currentBezierMode = NONE;
             drawingBezier = false;
+            selectedCurvePtr->color[0] = 1.0f;
+            selectedCurvePtr->color[1] = 0.5f;  
+            selectedCurvePtr->color[2] = 0.0f;
+            // Libération de la mémoire
+            selectedCurvePtr = nullptr;
             break;
         case '+':
         case '=': // Pour le + du clavier principal
@@ -1087,6 +1193,36 @@ void keyboard(unsigned char key, int x, int y){
             std::cout << "Pas diminué: " << currentBezierSteps << std::endl;
             glutPostRedisplay();
             break;
+        case 'm': // Répéter le dernier point de contrôle
+            if (!currentControlPoints.empty()) {
+                currentControlPoints.push_back(currentControlPoints.back());
+                std::cout << "Point dupliqué !" << std::endl;
+                glutPostRedisplay();
+            }
+            break;
+        
+    }
+    if(selectedCurvePtr != nullptr){
+        Mat3 mat = matIdentity();
+        switch (key) {
+            case 't': mat = matTranslate(10, 0); break;
+            case 'g': mat = matTranslate(-10, 0); break;
+            case 'h': mat = matTranslate(0, 10); break;
+            case 'b': mat = matTranslate(0, -10); break;
+            case 's': mat = matScale(1.2, 1.2); break;
+            case 'd': mat = matScale(0.8, 0.8); break;
+            case 'a': mat = matRotate(10 * M_PI / 180.0f); break; // 10 degrés
+            case 'z': mat = matRotate(-10 * M_PI / 180.0f); break;
+            case 'x': mat = matShear(0.3, 0); break;
+            case 'y': mat = matShear(0, 0.3); break;
+            default: return;
+        }
+        transformCurve(*selectedCurvePtr, mat);
+    
+        // Feedback visuel (en vert)
+        selectedCurvePtr->color[0] = 0.0f;
+        selectedCurvePtr->color[1] = 1.0f;
+        selectedCurvePtr->color[2] = 0.0f;
     }
     glutPostRedisplay();
 }
@@ -1159,7 +1295,7 @@ int main(int argc, char **argv){
         if (newCurve.mode == BERNSTEIN)
             newCurve.curvePoints = bezierCurve(newCurve.head, newCurve.steps);
         else
-            newCurve.curvePoints = bezierCurveDeCasteljau(newCurve.controlPoints, newCurve.steps);
+            newCurve.curvePoints = bezierCurveDeCasteljau(newCurve.head, newCurve.steps);
         auto end = std::chrono::high_resolution_clock::now();
         newCurve.computeTime = std::chrono::duration<double, std::milli>(end - start).count();
     
@@ -1215,6 +1351,7 @@ int main(int argc, char **argv){
     glutAddSubMenu("Poser points Bézier", PosePointsMenu);
     glutAddMenuEntry("Deplacer des points", 4);
     glutAddMenuEntry("Supprimer une courbe", 5);
+    glutAddMenuEntry("Selectionner une courbe", 6);
     glutAddSubMenu("Tracer courbe Bézier", TraceBezierMenu);
     glutAddSubMenu("Test+50 point", BezierTestMenu);
 
