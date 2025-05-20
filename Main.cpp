@@ -6,6 +6,7 @@
 #include <cmath>
 #include <chrono>
 #include <string>
+#include <algorithm>
 
 
 
@@ -32,7 +33,42 @@ struct SelectionBox {
     std::pair<int, int> end;    
     float color[3];
 };
+
+
+struct LinkedPoint {
+    Pixel pixel;
+    LinkedPoint* next;
+    LinkedPoint* prev;
+
+    LinkedPoint(int px, int py, float r, float g, float b) {
+        pixel.x = px;
+        pixel.y = py;
+        pixel.color[0] = r;
+        pixel.color[1] = g;
+        pixel.color[2] = b;
+        next = nullptr;
+        prev = nullptr;
+    }
+
+    void addPoint(int x, int y) {
+        float color[3] = {1.0f, 0.5f, 0.0f};
+        LinkedPoint* newPoint = new LinkedPoint(x, y, color[0], color[1], color[2]);
+        if (!next) {
+            next = newPoint;
+            newPoint->prev = this;
+        } else {
+            LinkedPoint* temp = next;
+            while (temp->next) {
+                temp = temp->next;
+            }
+            temp->next = newPoint;
+            newPoint->prev = temp;
+        }
+    }
+};
+
 struct BezierCurve {
+    LinkedPoint* head;
     std::vector<Pixel> controlPoints;
     std::vector<Pixel> curvePoints;
     BezierMode mode;
@@ -41,7 +77,13 @@ struct BezierCurve {
     float color[3];
 };
 
+struct ListChaineCourbes {
+    BezierCurve list;
+    ListChaineCourbes* next;
+};
+
 std::list<BezierCurve> bezierCurves;
+ListChaineCourbes* bezierHead = nullptr;
 std::vector<Pixel> currentControlPoints;
 BezierMode currentBezierMode = NONE;
 int currentBezierSteps = 1000;
@@ -49,6 +91,7 @@ const int currentBezierStepsMin = 10;
 const int currentBezierStepsMax = 10000;
 float currentBezierColor[3] = {1.0f, 0.5f, 0.0f};
 float selectedColor[3] = {1.0f, 1.0f, 1.0f};
+float colorPoint[3] = {1.0f, 0.5f, 0.0f};
 int mouseX = 0, mouseY = 0;
 int windowWidth = 500, windowHeight = 500;
 bool starSelectionBox = false;
@@ -57,9 +100,12 @@ bool drawTrail = false;
 bool showLine = false;
 bool drawingPolygon = false;
 bool drawingSelectionBox = false;
+bool deleteCurve = false;
 bool makeFill = false;
 bool recursif = false;
 bool pile = false;
+bool movingPoints = false;
+bool movingSoloPoint = false;
 bool scanLine = false;
 bool LCA = false;
 std::vector<SelectionBox> selectionBoxList;
@@ -255,7 +301,7 @@ std::vector<int> pascalLine(int n) {
 Pixel bezierPoint(const std::vector<Pixel>& controlPoints, double t) {
     int n = controlPoints.size() - 1;
     std::vector<int> C = pascalLine(n);
-    Pixel result = {0, 0};
+    Pixel result = {0, 0, {0, 0, 0}};
 
     for (int i = 0; i <= n; ++i) {
         double coeff = C[i] * pow(1 - t, n - i) * pow(t, i);
@@ -267,8 +313,15 @@ Pixel bezierPoint(const std::vector<Pixel>& controlPoints, double t) {
 }
 
 // Fonction pour générer la courbe de Bézier en utilisant des pas de t
-std::vector<Pixel> bezierCurve(const std::vector<Pixel>& controlPoints, int steps = 100) {
+std::vector<Pixel> bezierCurve(const LinkedPoint* head, int steps = 100) {
     std::vector<Pixel> curvePoints;
+    const LinkedPoint* current = head;
+    std::vector<Pixel> controlPoints;
+    while (current != nullptr) {
+        controlPoints.push_back(current->pixel);
+        current = current->next;
+    }
+
     for (int i = 0; i <= steps; ++i) {
         double t = static_cast<double>(i) / steps;
         curvePoints.push_back(bezierPoint(controlPoints, t));
@@ -606,10 +659,15 @@ void menuCallBack(int value){
             drawingSelectionBox = true;
             break;
         case 4:
-            drawingBezier = true;
-            currentControlPoints.clear();
-            std::cout << "Mode courbe de Bézier activé. Cliquez pour placer les points de contrôle." << std::endl;
+            movingPoints = true;
+            drawingBezier = false;
             break;
+        case 5:
+            movingPoints = false;
+            drawingBezier = false;
+            deleteCurve = true;
+            break;
+
     }
 }
 
@@ -685,54 +743,6 @@ void SelBoxStay(SelectionBox sb){
     glEnd();
 }
 
-void drawBezierCurve() {
-    if (currentBezierMode != NONE && currentControlPoints.size() >= 2) {
-        std::vector<Pixel> curvePoints;
-        if (currentBezierMode == BERNSTEIN)
-            curvePoints = bezierCurve(currentControlPoints);
-        else if (currentBezierMode == DECASTELJAU)
-            curvePoints = bezierCurveDeCasteljau(currentControlPoints);
-
-        glBegin(GL_LINE_STRIP);
-        for (const Pixel& pt : curvePoints) {
-            glVertex2i(pt.x, pt.y);
-        }
-        glEnd();
-    }
-}
-
-void drawBezierCurveWithTiming() {
-    if (currentControlPoints.size() >= 2 && currentBezierMode != NONE) {
-        std::vector<Pixel> curvePoints;
-        int steps = 1000; // Par exemple, pour avoir une courbe bien lisse
-
-        auto start = std::chrono::high_resolution_clock::now();
-
-        if (currentBezierMode == BERNSTEIN)
-            curvePoints = bezierCurve(currentControlPoints, steps);
-        else if (currentBezierMode == DECASTELJAU)
-            curvePoints = bezierCurveDeCasteljau(currentControlPoints, steps);
-
-        auto end = std::chrono::high_resolution_clock::now();
-        double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
-
-        // Affiche le temps en ms dans la console
-        if (currentBezierMode == BERNSTEIN)
-            std::cout << "[Bernstein] Temps de calcul : " << elapsed << " ms pour " << currentControlPoints.size() << " points de contrôle, " << steps << " segments." << std::endl;
-        else
-            std::cout << "[De Casteljau] Temps de calcul : " << elapsed << " ms pour " << currentControlPoints.size() << " points de contrôle, " << steps << " segments." << std::endl;
-
-        // Tracé de la courbe (chaînage des points)
-        glColor3f(0.2, 0.2, 1.0); // Bleu par exemple
-        glBegin(GL_LINE_STRIP);
-        for (const Pixel& pt : curvePoints) {
-            glVertex2i(pt.x, pt.y);
-        }
-        glEnd();
-    }
-}
-
-
 void displayCallBack(){
     glClear(GL_COLOR_BUFFER_BIT);
     if(showPixel){
@@ -760,7 +770,7 @@ void displayCallBack(){
     }
 
     if (!currentControlPoints.empty()) {
-        glColor3f(1.0, 0.5, 0.0); // Par exemple orange
+        glColor3fv(colorPoint); // Par exemple orange
         glPointSize(7);
         glBegin(GL_POINTS);
         for (const Pixel& pt : currentControlPoints) {
@@ -780,22 +790,47 @@ void displayCallBack(){
     }
 
 
-    for (const auto& curve : bezierCurves) {
-        glColor3fv(curve.color);
+    // Affichage des courbes de Bézier
+    ListChaineCourbes* current = bezierHead;
+    while (current != nullptr) {
+        glColor3fv(current->list.color);
         glBegin(GL_LINE_STRIP);
-        for (const Pixel& pt : curve.curvePoints)
+        for (const Pixel& pt : current->list.curvePoints) {
             glVertex2i(pt.x, pt.y);
+        }
         glEnd();
-    
-        // Affiche aussi les points de contrôle (optionnel)
-        glColor3fv(curve.color);
         glPointSize(7);
         glBegin(GL_POINTS);
-        for (const Pixel& p : curve.controlPoints)
-            glVertex2i(p.x, p.y);
+        LinkedPoint* currentPoint = current->list.head;
+        while (currentPoint != nullptr) {
+            glColor3fv(currentPoint->pixel.color);
+            glVertex2i(currentPoint->pixel.x, currentPoint->pixel.y);
+            currentPoint = currentPoint->next;
+        }
         glEnd();
-        glPointSize(1);
+        current = current->next;
     }
+    // for (const auto& curve : bezierCurves) {
+    //     glColor3fv(curve.color);
+    //     glBegin(GL_LINE_STRIP);
+    //     LinkedPoint* current = curve.head;
+    //     for (const Pixel& pt : curve.curvePoints) {
+    //         glVertex2i(pt.x, pt.y);
+    //     }
+    //     glEnd();
+    
+    //     // Affiche aussi les points de contrôle (optionnel)
+    //     glColor3fv(curve.color);
+    //     glPointSize(7);
+    //     glBegin(GL_POINTS);
+    //     current = curve.head;
+    //     while (current != nullptr) {
+    //         glVertex2i(current->pixel.x, current->pixel.y);
+    //         current = current->next;
+    //     }
+    //     glEnd();
+    //     glPointSize(1);
+    // }
 
     if(!polygonList.empty()){
         for(Polygons p : polygonList){
@@ -873,6 +908,84 @@ void mouseCallBack(int input, int state, int x, int y){
                 currentSelBox.end = std::make_pair(0, 0);
                 starSelectionBox = false;
                 drawingSelectionBox = false;
+            }
+        }
+        if (deleteCurve) {
+            std::cout << "Suppression de la courbe" << std::endl;
+
+            ListChaineCourbes* currentCurve = bezierHead;
+            std::cout << "x: " << x << " y: " << (windowHeight - y) << std::endl;
+            while (currentCurve != nullptr) {
+                if (std::any_of(currentCurve->list.curvePoints.begin(), currentCurve->list.curvePoints.end(), 
+                    [x, y](const Pixel& p) { return std::abs(p.x - x) < 5 && std::abs(p.y - (windowHeight - y)) < 5; })) {
+                    // Supprimer la courbe
+                    std::cout << "Courbe supprimée" << std::endl;
+                    if (currentCurve == bezierHead) {
+                        bezierHead = currentCurve->next;
+                    } else {
+                        ListChaineCourbes* prevCurve = bezierHead;
+                        while (prevCurve->next != currentCurve) {
+                            prevCurve = prevCurve->next;
+                        }
+                        prevCurve->next = currentCurve->next;
+                    }
+                    deleteCurve = false;
+                }
+                currentCurve = currentCurve->next;
+            }
+        }
+         // Déplacement des points de contrôle
+         // std::cout << "x: " << x << " y: " << y << std::endl;
+         // std::cout << "mouseX: " << mouseX << " mouseY: " << mouseY << std::endl;
+        if (movingSoloPoint) {
+            ListChaineCourbes* currentCurve = bezierHead;
+            while (currentCurve != nullptr) {
+                LinkedPoint* currentPoint = currentCurve->list.head;
+                while (currentPoint != nullptr) {
+                    if (currentPoint->pixel.color[0] == 0.0f && currentPoint->pixel.color[1] == 1.0f && currentPoint->pixel.color[2] == 0.0f) {
+                        currentPoint->pixel.x = x;
+                        currentPoint->pixel.y = windowHeight - y;
+                        currentPoint->pixel.color[0] = 1.0f;
+                        currentPoint->pixel.color[1] = 0.5f;
+                        currentPoint->pixel.color[2] = 0.0f;
+                        movingSoloPoint = false;
+                        auto start = std::chrono::high_resolution_clock::now();
+                        if (currentCurve->list.mode == BERNSTEIN)
+                        currentCurve->list.curvePoints = bezierCurve(currentCurve->list.head, currentCurve->list.steps);
+                        else
+                        currentCurve->list.curvePoints = bezierCurveDeCasteljau(currentCurve->list.controlPoints, currentCurve->list.steps);
+                        auto end = std::chrono::high_resolution_clock::now();
+                        currentCurve->list.computeTime = std::chrono::duration<double, std::milli>(end - start).count();
+                        glutPostRedisplay();
+                        movingPoints = true;
+                        break;
+                    }
+                    currentPoint = currentPoint->next;
+                }
+                currentCurve = currentCurve->next;
+            }
+        }
+        else if (movingPoints) {
+            std::cout << "Déplacement des points de contrôle" << std::endl;
+            ListChaineCourbes* currentCurve = bezierHead;
+            while (currentCurve != nullptr) {
+                LinkedPoint* currentPoint = currentCurve->list.head;
+                while (currentPoint != nullptr) {
+                    // std::cout << "x: " << x << " y: " << y << std::endl;
+                    // std::cout << "currentPoint.x: " << currentPoint->pixel.x << " currentPoint.y: " << currentPoint->pixel.y << std::endl;
+                    // std::cout << "Différence x: " << std::abs(currentPoint->pixel.x - x) << " Différence y: " << std::abs(currentPoint->pixel.y - (windowHeight - y)) << std::endl;
+                    if (std::abs(currentPoint->pixel.x - x) <= 5 && std::abs(currentPoint->pixel.y - (windowHeight - y)) <= 5) {
+                        std::cout << "Point de contrôle déplacé" << std::endl;
+                        currentPoint->pixel.color[0] = 0.0f;
+                        currentPoint->pixel.color[1] = 1.0f;
+                        currentPoint->pixel.color[2] = 0.0f;
+                        movingSoloPoint = true;
+                        movingPoints = false;
+                    }
+                    currentPoint = currentPoint->next;
+                }
+                currentCurve = currentCurve->next;
+                glutPostRedisplay();
             }
         }
         if (makeFill && !drawingPolygon) {
@@ -1022,23 +1135,48 @@ int main(int argc, char **argv){
         if (currentControlPoints.size() < 2) return;
 
         BezierCurve newCurve;
-        newCurve.controlPoints = currentControlPoints;
+        newCurve.head = NULL;
+        LinkedPoint* current = NULL;
+        for (const Pixel& p : currentControlPoints) {
+            if (newCurve.head == NULL) {
+                newCurve.head = new LinkedPoint(p.x, p.y, p.color[0], p.color[1], p.color[2]);
+                current = newCurve.head;
+            } else {
+                current->addPoint(p.x, p.y);
+                current = current->next;
+            }
+        }
         newCurve.mode = (value == 1 ? BERNSTEIN : DECASTELJAU);
         newCurve.steps = currentBezierSteps;
-        newCurve.color[0] = currentBezierColor[0];
-        newCurve.color[1] = currentBezierColor[1];
-        newCurve.color[2] = currentBezierColor[2];
+        newCurve.color[0] = newCurve.head->pixel.color[0];
+        newCurve.color[1] = newCurve.head->pixel.color[1];
+        newCurve.color[2] = newCurve.head->pixel.color[2];
+        // newCurve.color[0] = currentBezierColor[0];
+        // newCurve.color[1] = currentBezierColor[1];
+        // newCurve.color[2] = currentBezierColor[2];
     
         auto start = std::chrono::high_resolution_clock::now();
         if (newCurve.mode == BERNSTEIN)
-            newCurve.curvePoints = bezierCurve(newCurve.controlPoints, newCurve.steps);
+            newCurve.curvePoints = bezierCurve(newCurve.head, newCurve.steps);
         else
             newCurve.curvePoints = bezierCurveDeCasteljau(newCurve.controlPoints, newCurve.steps);
         auto end = std::chrono::high_resolution_clock::now();
         newCurve.computeTime = std::chrono::duration<double, std::milli>(end - start).count();
     
-        bezierCurves.push_back(newCurve);
-    
+        if (bezierHead == NULL) {
+            bezierHead = new ListChaineCourbes;
+            bezierHead->list = newCurve;
+            bezierHead->next = NULL;
+        } else {
+            ListChaineCourbes* current = bezierHead;
+            while (current->next != NULL) {
+                current = current->next;
+            }
+            current->next = new ListChaineCourbes;
+            current->next->list = newCurve;
+            current->next->next = NULL;
+        }
+
         // Reset pour une nouvelle courbe
         currentControlPoints.clear();
         currentBezierMode = NONE;
@@ -1061,10 +1199,11 @@ int main(int argc, char **argv){
             }
             drawingBezier = false;
             glutPostRedisplay();
-            std::cout << "Test : " << N << " points de contrôle créés." << std::endl;
+            std::cout << "Test : " << N << " points de controle crees." << std::endl;
         }
     });
     glutAddMenuEntry("Générer 60 points Bézier (test perf)", 1);
+
 
     int menu = glutCreateMenu(menuCallBack);
 
@@ -1074,6 +1213,8 @@ int main(int argc, char **argv){
     glutAddSubMenu("fenetrage", FenMenu);
     glutAddSubMenu("remplissage", FillMenu);
     glutAddSubMenu("Poser points Bézier", PosePointsMenu);
+    glutAddMenuEntry("Deplacer des points", 4);
+    glutAddMenuEntry("Supprimer une courbe", 5);
     glutAddSubMenu("Tracer courbe Bézier", TraceBezierMenu);
     glutAddSubMenu("Test+50 point", BezierTestMenu);
 
